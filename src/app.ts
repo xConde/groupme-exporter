@@ -13,12 +13,11 @@ async function main() {
   const outputDir = await promptOutputDir();
   const saveChatHistory = await promptSaveChatHistory();
 
-  try {
-    await groupMeService.downloadContent(conversationType, conversationId, outputDir, saveChatHistory);
-  } catch (error) {
-    console.error(chalk.red(`Error downloading content. ${(error as Error).message}`));
-    process.exit(1);
-  }
+  groupMeService.downloadContent(conversationType, conversationId, outputDir, saveChatHistory)
+    .catch((error: Error) => {
+      console.error(chalk.red(`Error downloading content. ${error.message}`));
+      process.exit(1);
+    });
 }
 
 main();
