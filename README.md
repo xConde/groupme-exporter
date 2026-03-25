@@ -1,37 +1,122 @@
-# GroupMe Exporter
+# groupme-exporter
 
-This is a Node.js script that downloads all media files (photos and videos) from a GroupMe conversation and saves them to the local filesystem. The script uses the GroupMe API to fetch the conversation history and download the media files. It also supports saving the chat history to a text file.
+Export media, chat history, and data from GroupMe conversations.
+
+## Features
+
+- Download photos, videos, and file attachments from groups and DMs
+- Export chat history as text files (per year + consolidated)
+- Export as JSON, HTML, CSV formats
+- Export analytics and stats summary
+- Smart image format detection from URLs
+- Resume interrupted exports with checkpoint support
+- Skip already-downloaded media files
+- Memory Lane: random conversation snippets displayed during export
+- Interactive prompts or full CLI automation
 
 ## Requirements
 
-- Node.js v14 or later
-- Yarn package manager
-- A GroupMe API access token
+- Node.js 18+
+- GroupMe API access token ([get one here](https://dev.groupme.com/))
 
 ## Installation
 
-1. Clone this repository or download the source code.
-2. Install dependencies by running `yarn install` in the project directory.
+```bash
+git clone https://github.com/YOUR_USERNAME/groupme-exporter.git
+cd groupme-exporter
+npm install
+```
 
 ## Usage
 
-1. Obtain a GroupMe API access token from https://dev.groupme.com/.
-2. Run the script with `yarn start`.
-3. Follow the prompts to select a conversation, choose an output directory, and specify whether to save the chat history.
-4. The script will download all media files from the selected conversation and save them to the specified output directory. If you choose to save the chat history, the script will also create a text file containing the full chat history.
+### Interactive Mode
 
-Note: The script uses the GroupMe API to fetch the conversation history. There is a rate limit on the number of requests that can be made in a given time period, so extracting the chat history may take a while depending on how many messages there are.
+```bash
+npm start
+```
 
-## Memory Lane Feature
-While downloading media files and extracting chat history, the script will occasionally print out a randomly selected snippet of a conversation that took place within the last two hours. These snippets are styled with inline colors to make them stand out from other console output. The messages selected are based on the message ID, ensuring that each snippet is unique and different every time the script is run. If the selected message has other messages that were also within the two-hour window, they will be included in the output as well.
+You'll be prompted for your token, conversation type, and output directory.
 
-## Options
+### CLI Mode
 
-The following options are available when running the script:
+```bash
+npx tsx src/app.ts --token YOUR_TOKEN --type groups --conversation GROUP_ID --output /path/to/output
+```
 
-- `--help`: Print help information and exit.
-- `--version`: Print version information and exit.
+### Environment Variable
+
+```bash
+export GROUPME_TOKEN=your_token_here
+npm start
+```
+
+Or use a `.env` file:
+
+```bash
+cp .env.example .env
+# Edit .env with your token
+npm run start:env
+```
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `-t, --token <token>` | GroupMe API access token |
+| `-o, --output <dir>` | Output directory |
+| `--type <type>` | Conversation type: `groups` or `chats` |
+| `-c, --conversation <id>` | Conversation ID |
+| `--no-media` | Skip media download |
+| `--no-chat-history` | Skip chat history text export |
+| `--help` | Show help |
+| `--version` | Show version |
+
+## Output Structure
+
+```
+output/
+├── 2023/
+│   ├── Jan/
+│   │   ├── 01-15-2023.jpeg
+│   │   └── 01-15-2023_2.png
+│   └── Feb/
+│       └── 02-20-2023.mp4
+├── chat-history/
+│   ├── 2023.txt
+│   ├── 2024.txt
+│   └── all.txt
+├── json/
+│   ├── 2023.json
+│   ├── 2024.json
+│   └── all.json
+├── html/
+│   └── chat.html
+├── csv/
+│   ├── 2023.csv
+│   ├── 2024.csv
+│   └── all.csv
+└── stats.json
+```
+
+## Development
+
+```bash
+npm test          # Run tests
+npm run test:watch # Watch mode
+npm run build     # Type check
+```
+
+## Tech Stack
+
+- TypeScript (strict mode, noImplicitAny)
+- Native fetch API (no axios)
+- dayjs (lightweight date handling)
+- @clack/prompts (interactive CLI)
+- commander (CLI argument parsing)
+- nanospinner (progress spinners)
+- picocolors (terminal colors)
+- Vitest + MSW (testing)
 
 ## License
 
-This script is licensed under the MIT License. See the LICENSE file for more information.
+ISC

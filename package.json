@@ -1,28 +1,53 @@
 {
   "name": "groupme-exporter",
-  "version": "1.0.0",
-  "description": "A script to download media files from GroupMe conversations",
-  "main": "app.ts",
+  "version": "2.0.0",
+  "description": "Export media and chat history from GroupMe conversations",
+  "type": "module",
+  "main": "src/app.ts",
+  "bin": {
+    "groupme-exporter": "./src/app.ts"
+  },
+  "files": [
+    "src",
+    "package.json",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "groupme",
+    "exporter",
+    "backup",
+    "chat-history",
+    "media-download"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/edconde/groupme-exporter.git"
+  },
   "scripts": {
-    "start": "ts-node src/app.ts"
+    "start": "tsx src/app.ts",
+    "start:env": "tsx --env-file=.env src/app.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc --noEmit"
   },
   "dependencies": {
-    "axios": "^0.21.1",
-    "chalk": "^4.1.0",
-    "inquirer": "^9.1.4",
-    "moment": "^2.29.4",
-    "ora": "^5.4.1",
-    "p-limit": "^4.0.0",
-    "progress": "^2.0.0",
-    "prompts": "^2.4.0",
-    "terminal-kit": "2.5"
+    "@clack/prompts": "1.1.0",
+    "commander": "14.0.3",
+    "dayjs": "1.11.20",
+    "nanospinner": "1.2.2",
+    "picocolors": "1.1.1",
+    "tsx": "4.21.0"
   },
   "devDependencies": {
-    "@types/inquirer": "^9.0.3",
-    "@types/node": "^16.11.7",
-    "@types/progress": "^2.0.5",
-    "@types/prompts": "^2.4.2",
-    "ts-node": "^10.4.0",
-    "typescript": "^4.5.4"
+    "@types/node": "25.5.0",
+    "msw": "2.12.14",
+    "typescript": "6.0.2",
+    "vitest": "4.1.1"
   }
 }
