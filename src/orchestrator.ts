@@ -6,6 +6,7 @@ import { logMessage } from './display.js';
 import { appendMessages, appendMediaMessageIds, generateStats } from './transform.js';
 import { initiateDownloadMediaFiles, writeChatHistory, writeJsonExport, writeHtmlExport, writeCsvExport } from './download.js';
 import { ExportState, loadState, saveState, clearState } from './checkpoint.js';
+import { UserResolver } from './userResolver.js';
 
 export class ExportOrchestrator {
   private service: GroupmeService;
@@ -40,12 +41,50 @@ export class ExportOrchestrator {
     }
 
     const startTime = Date.now();
+    const resolver = new UserResolver();
+    let conversationName: string | undefined;
 
     try {
+      if (conversationType === 'groups') {
+        try {
+          const group = await this.service.getGroup(chatId);
+          resolver.seedFromGroupMembers(group.members ?? []);
+          conversationName = group.name;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.log(`Could not fetch group members for reaction name resolution: ${message}. Falling back to message-cache only.`);
+        }
+      } else {
+        try {
+          const me = await this.service.getCurrentUser();
+          // /users/me may return either `user_id` or `id`; prefer user_id, fall back to id.
+          const selfId = me.user_id ?? me.id ?? '';
+          resolver.seedFromDmParticipants({ user_id: selfId, name: me.name }, '', '');
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.log(`Could not fetch current user for DM reaction resolution: ${message}. Falling back to message-cache only.`);
+        }
+      }
+
+      let batchesFetched = 0;
       while (true) {
         const messages = await this.service.getMessages(conversationType, chatId, lastMessageId);
-        if (!messages || messages.length === 0) { break; }
+        if (!messages || messages.length === 0) {
+          // GroupMe returns 304/empty when before_id is past start of history. If
+          // this happens before any batch was fetched, the conversation is empty.
+          // If it happens mid-export *before* a partial batch (< 100), it's a real
+          // anomaly — log it so we'd notice rather than silently truncate.
+          if (batchesFetched > 0 && lastMessageId !== undefined) {
+            const partial = fetchCount % 100 !== 0;
+            if (!partial) {
+              console.log('Note: end-of-history signaled at a 100-multiple boundary. If the conversation is unexpectedly short, re-run to verify.');
+            }
+          }
+          break;
+        }
+        batchesFetched++;
 
+        resolver.observeMessages(messages);
         lastMessageId = messages[messages.length - 1].id;
         fetchCount += messages.length;
         logMessage(messages, lastMessageId);
@@ -74,23 +113,24 @@ export class ExportOrchestrator {
       }
 
       if (saveChatHistory) {
-        writeChatHistory(allMessages, outputDir);
+        writeChatHistory(allMessages, outputDir, resolver);
         console.log('Chat history saved.');
       }
 
       writeJsonExport(allMessages, outputDir, {
+        conversationName,
         exportDate: new Date().toISOString(),
         totalMessages: fetchCount,
-      });
+      }, resolver);
       console.log('JSON export saved.');
 
-      writeHtmlExport(allMessages, outputDir);
+      writeHtmlExport(allMessages, outputDir, resolver);
       console.log('HTML export saved.');
 
-      writeCsvExport(allMessages, outputDir);
+      writeCsvExport(allMessages, outputDir, resolver);
       console.log('CSV export saved.');
 
-      const stats = generateStats(allMessages);
+      const stats = generateStats(allMessages, resolver);
       // Save stats to file
       fs.mkdirSync(outputDir, { recursive: true });
       fs.writeFileSync(path.join(outputDir, 'stats.json'), JSON.stringify(stats, null, 2));

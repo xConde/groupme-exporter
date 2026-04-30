@@ -1,4 +1,4 @@
-import { Conversation, GroupMeApiResponse, GroupMessagesResponse, DirectMessagesResponse, Message } from './model.js';
+import { Conversation, GroupMeApiResponse, GroupMessagesResponse, DirectMessagesResponse, Message, Group, CurrentUser } from './model.js';
 import { ApiError } from './errors.js';
 
 const API_BASE_URL = "https://api.groupme.com/v3";
@@ -34,6 +34,24 @@ export class GroupmeService {
     return allConversations;
   }
 
+  async getGroup(groupId: string): Promise<Group> {
+    const body = await this.makeRequestWithRetries<GroupMeApiResponse<Group>>(
+      `groups/${groupId}`,
+      { token: this.accessToken },
+      5
+    );
+    return body.response;
+  }
+
+  async getCurrentUser(): Promise<CurrentUser> {
+    const body = await this.makeRequestWithRetries<GroupMeApiResponse<CurrentUser>>(
+      'users/me',
+      { token: this.accessToken },
+      5
+    );
+    return body.response;
+  }
+
   async getMessages(conversationType: string, chatId: string, beforeId?: string): Promise<Message[]> {
     const url = conversationType === 'groups' ? `groups/${chatId}/messages` : 'direct_messages';
     const params: Record<string, string | number> = {
@@ -47,13 +65,22 @@ export class GroupmeService {
       params.before_id = beforeId;
     }
 
-    const body = conversationType === 'groups'
-      ? await this.makeRequestWithRetries<GroupMeApiResponse<GroupMessagesResponse>>(url, params, 5)
-      : await this.makeRequestWithRetries<GroupMeApiResponse<DirectMessagesResponse>>(url, params, 5);
-    const messages: Message[] | undefined = conversationType === 'groups'
-      ? (body as GroupMeApiResponse<GroupMessagesResponse>).response.messages
-      : (body as GroupMeApiResponse<DirectMessagesResponse>).response.direct_messages;
-    return messages || [];
+    try {
+      const body = conversationType === 'groups'
+        ? await this.makeRequestWithRetries<GroupMeApiResponse<GroupMessagesResponse>>(url, params, 5)
+        : await this.makeRequestWithRetries<GroupMeApiResponse<DirectMessagesResponse>>(url, params, 5);
+      const messages: Message[] | undefined = conversationType === 'groups'
+        ? (body as GroupMeApiResponse<GroupMessagesResponse>).response.messages
+        : (body as GroupMeApiResponse<DirectMessagesResponse>).response.direct_messages;
+      return messages || [];
+    } catch (error: unknown) {
+      // GroupMe returns 304 Not Modified when `before_id` is past the start of
+      // history. Treat as end-of-history rather than a fatal error.
+      if (error instanceof ApiError && error.statusCode === 304) {
+        return [];
+      }
+      throw error;
+    }
   }
 
   async makeRequestWithRetries<T>(url: string, params: Record<string, string | number>, maxRetries: number): Promise<T> {
