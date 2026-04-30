@@ -108,6 +108,62 @@ describe('GroupmeService', () => {
       const messages = await service.getMessages('groups', '123');
       expect(messages).toHaveLength(0);
     });
+
+    it('should return [] when API responds with 304 (end of history)', async () => {
+      server.use(
+        http.get(`${API_BASE_URL}/groups/123/messages`, () => {
+          return new HttpResponse(null, { status: 304 });
+        })
+      );
+
+      const messages = await service.getMessages('groups', '123', 'very-old-id');
+      expect(messages).toEqual([]);
+    });
+  });
+
+  describe('getGroup', () => {
+    it('should fetch group with members from /groups/:id', async () => {
+      server.use(
+        http.get(`${API_BASE_URL}/groups/42`, ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('token')).toBe('test-token');
+          return HttpResponse.json({
+            response: {
+              id: '42',
+              name: 'Test Group',
+              members: [
+                { user_id: 'u1', nickname: 'Alice' },
+                { user_id: 'u2', nickname: 'Bob' },
+              ],
+            },
+          });
+        })
+      );
+
+      const group = await service.getGroup('42');
+      expect(group.id).toBe('42');
+      expect(group.name).toBe('Test Group');
+      expect(group.members).toHaveLength(2);
+      expect(group.members[0].nickname).toBe('Alice');
+    });
+  });
+
+  describe('getCurrentUser', () => {
+    it('should return user_id and name from /users/me', async () => {
+      server.use(
+        http.get(`${API_BASE_URL}/users/me`, ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('token')).toBe('test-token');
+          return HttpResponse.json({
+            response: { user_id: 'me123', name: 'Current User' },
+          });
+        })
+      );
+
+      const user = await service.getCurrentUser();
+      expect(user.user_id).toBe('me123');
+      expect(user.name).toBe('Current User');
+    });
   });
 
   describe('makeRequestWithRetries', () => {

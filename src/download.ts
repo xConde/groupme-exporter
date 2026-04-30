@@ -6,7 +6,8 @@ import advancedFormat from 'dayjs/plugin/advancedFormat.js';
 dayjs.extend(advancedFormat);
 import { createSpinner } from 'nanospinner';
 import { MediaFile, Message } from './model.js';
-import { getMediaFiles, chunkArray, groupMessagesByYear } from './transform.js';
+import { getMediaFiles, chunkArray, groupMessagesByYear, formatReactions } from './transform.js';
+import { UserResolver } from './userResolver.js';
 
 export async function initiateDownloadMediaFiles(allMessages: Message[], mediaMessageIds: string[], outputDir: string, chatId: string) {
   const mediaFiles = getMediaFiles(mediaMessageIds, allMessages);
@@ -73,7 +74,7 @@ export async function downloadMediaFiles(mediaFiles: MediaFile[], outputDir: str
   batchSpinner.success({ text: `Complete: ${downloaded} new, ${skipped} skipped out of ${mediaFiles.length} media files` });
 }
 
-export function writeJsonExport(allMessages: Message[], outputDir: string, metadata: { conversationName?: string; exportDate: string; totalMessages: number }): void {
+export function writeJsonExport(allMessages: Message[], outputDir: string, metadata: { conversationName?: string; exportDate: string; totalMessages: number }, resolver?: UserResolver): void {
   const jsonDir = path.join(outputDir, 'json');
   fs.mkdirSync(jsonDir, { recursive: true });
 
@@ -84,7 +85,7 @@ export function writeJsonExport(allMessages: Message[], outputDir: string, metad
   for (const year of Object.keys(messagesByYear).sort()) {
     const yearData = {
       metadata: { ...metadata, year, messageCount: messagesByYear[year].length },
-      messages: messagesByYear[year].map(formatMessageJson),
+      messages: messagesByYear[year].map(m => formatMessageJson(m, resolver)),
     };
     fs.writeFileSync(path.join(jsonDir, `${year}.json`), JSON.stringify(yearData, null, 2));
   }
@@ -92,26 +93,30 @@ export function writeJsonExport(allMessages: Message[], outputDir: string, metad
   // Consolidated file
   const allData = {
     metadata: { ...metadata, messageCount: chronologicalMessages.length },
-    messages: chronologicalMessages.map(formatMessageJson),
+    messages: chronologicalMessages.map(m => formatMessageJson(m, resolver)),
   };
   fs.writeFileSync(path.join(jsonDir, 'all.json'), JSON.stringify(allData, null, 2));
 }
 
-function formatMessageJson(message: Message): Record<string, unknown> {
+function formatMessageJson(message: Message, resolver?: UserResolver): Record<string, unknown> {
+  const reactions = formatReactions(message, resolver);
+  const hasReactions = reactions.likes.length > 0 || reactions.emojis.length > 0;
   return {
     id: message.id,
     created_at: message.created_at,
     timestamp: dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss'),
     sender: message.name,
+    sender_id: message.user_id,
     text: message.text,
     attachments: (message.attachments || []).map(a => ({
       type: a.type,
       url: a.url,
     })),
+    ...(hasReactions ? { reactions } : {}),
   };
 }
 
-export function writeChatHistory(allMessages: Message[], outputDir: string): void {
+export function writeChatHistory(allMessages: Message[], outputDir: string, resolver?: UserResolver): void {
   const chatHistoryDir = path.join(outputDir, 'chat-history');
   fs.mkdirSync(chatHistoryDir, { recursive: true });
 
@@ -130,7 +135,9 @@ export function writeChatHistory(allMessages: Message[], outputDir: string): voi
         return ' [📎 Attachment]';
       })
       .join('');
-    return `[${timestamp}] ${message.name}: ${text}${attachmentIndicators}`;
+    const main = `[${timestamp}] ${message.name}: ${text}${attachmentIndicators}`;
+    const reactionsLine = formatReactionsTextLine(message, resolver);
+    return reactionsLine ? `${main}\n${reactionsLine}` : main;
   };
 
   for (const year of Object.keys(messagesByYear)) {
@@ -142,7 +149,21 @@ export function writeChatHistory(allMessages: Message[], outputDir: string): voi
   fs.writeFileSync(path.join(chatHistoryDir, 'all.txt'), allLines);
 }
 
-export function writeHtmlExport(allMessages: Message[], outputDir: string): void {
+function formatReactionsTextLine(message: Message, resolver?: UserResolver): string {
+  const r = formatReactions(message, resolver);
+  if (r.likes.length === 0 && r.emojis.length === 0) return '';
+  const parts: string[] = [];
+  if (r.likes.length > 0) {
+    parts.push(`❤️ ${r.likes.map(u => u.name).join(', ')}`);
+  }
+  for (const e of r.emojis) {
+    parts.push(`${e.code} ${e.users.map(u => u.name).join(', ')}`);
+  }
+  // Plain ASCII prefix so the file reads cleanly in older terminals, grep, less.
+  return `  + ${parts.join(' | ')}`;
+}
+
+export function writeHtmlExport(allMessages: Message[], outputDir: string, resolver?: UserResolver): void {
   const htmlDir = path.join(outputDir, 'html');
   fs.mkdirSync(htmlDir, { recursive: true });
 
@@ -157,6 +178,21 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string): void
       .replace(/'/g, '&#39;');
   };
 
+  const renderReactions = (message: Message): string => {
+    const r = formatReactions(message, resolver);
+    if (r.likes.length === 0 && r.emojis.length === 0) return '';
+    const pills: string[] = [];
+    if (r.likes.length > 0) {
+      const names = escapeHtml(r.likes.map(u => u.name).join(', '));
+      pills.push(`<span class="reaction"><span class="emoji">❤️</span><span class="names">${names}</span></span>`);
+    }
+    for (const e of r.emojis) {
+      const names = escapeHtml(e.users.map(u => u.name).join(', '));
+      pills.push(`<span class="reaction"><span class="emoji">${escapeHtml(e.code)}</span><span class="names">${names}</span></span>`);
+    }
+    return `<div class="reactions">${pills.join('')}</div>`;
+  };
+
   const renderMessage = (message: Message): string => {
     const timestamp = dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss');
     const name = escapeHtml(message.name);
@@ -166,11 +202,13 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string): void
       if (a.type === 'video') return `<a href="${escapeHtml(a.url)}" target="_blank">[Video]</a>`;
       return `<span class="attachment">[${escapeHtml(a.type)}]</span>`;
     }).join('');
+    const reactions = renderReactions(message);
 
     return `<div class="message">
       <div class="meta"><strong>${name}</strong> <span class="time">${timestamp}</span></div>
       <div class="text">${text}</div>
       ${attachments ? `<div class="attachments">${attachments}</div>` : ''}
+      ${reactions}
     </div>`;
   };
 
@@ -192,6 +230,11 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string): void
   .text { color: #333; line-height: 1.4; white-space: pre-wrap; word-wrap: break-word; }
   .attachments { margin-top: 8px; }
   .attachment { color: #666; font-style: italic; }
+  .reactions { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .reaction { background: #f0f4f8; color: #333; border-radius: 12px; padding: 2px 10px; font-size: 0.85em; display: inline-flex; align-items: center; gap: 4px; }
+  .reaction .emoji { font-size: 0.95em; }
+  .reaction .names { color: #555; }
+  @media (max-width: 480px) { .reaction { font-size: 0.8em; padding: 2px 8px; } }
   img { display: block; }
 </style>
 </head>
@@ -207,14 +250,16 @@ ${chronologicalMessages.map(renderMessage).join('\n')}
   fs.writeFileSync(path.join(htmlDir, 'chat.html'), html);
 }
 
-export function writeCsvExport(allMessages: Message[], outputDir: string): void {
+export function writeCsvExport(allMessages: Message[], outputDir: string, resolver?: UserResolver): void {
   const csvDir = path.join(outputDir, 'csv');
   fs.mkdirSync(csvDir, { recursive: true });
 
   const chronologicalMessages = [...allMessages].reverse();
   const messagesByYear = groupMessagesByYear(chronologicalMessages);
 
-  const csvHeader = 'timestamp,sender,text,attachment_count,attachment_types\n';
+  // Main message CSV: simple numeric reaction summary so analysts can sort/filter
+  // without parsing nested formats. Full reactor detail lives in reactions.csv.
+  const csvHeader = 'message_id,timestamp,sender,text,attachment_count,attachment_types,like_count,emoji_reaction_count\n';
 
   const escapeCsv = (value: string): string => {
     // RFC 4180: if value contains comma, quote, or newline, wrap in quotes and escape internal quotes
@@ -226,12 +271,16 @@ export function writeCsvExport(allMessages: Message[], outputDir: string): void 
 
   const formatRow = (message: Message): string => {
     const timestamp = dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss');
+    const messageId = escapeCsv(message.id);
     const sender = escapeCsv(message.name);
     const text = escapeCsv(message.text ?? '');
     const attachments = message.attachments || [];
     const attachmentCount = String(attachments.length);
     const attachmentTypes = escapeCsv(attachments.map(a => a.type).join(';'));
-    return `${timestamp},${sender},${text},${attachmentCount},${attachmentTypes}`;
+    const reactions = formatReactions(message, resolver);
+    const likeCount = String(reactions.likes.length);
+    const emojiReactionCount = String(reactions.emojis.reduce((sum, e) => sum + e.users.length, 0));
+    return `${messageId},${timestamp},${sender},${text},${attachmentCount},${attachmentTypes},${likeCount},${emojiReactionCount}`;
   };
 
   // Per-year files
@@ -243,6 +292,34 @@ export function writeCsvExport(allMessages: Message[], outputDir: string): void 
   // Consolidated file
   const allRows = chronologicalMessages.map(formatRow).join('\n');
   fs.writeFileSync(path.join(csvDir, 'all.csv'), csvHeader + allRows);
+
+  // Tidy reactions file: one row per reactor, joinable by message_id.
+  writeReactionsCsv(chronologicalMessages, csvDir, escapeCsv, resolver);
+}
+
+function writeReactionsCsv(
+  chronologicalMessages: Message[],
+  csvDir: string,
+  escapeCsv: (value: string) => string,
+  resolver?: UserResolver
+): void {
+  const header = 'message_id,timestamp,sender,reaction_type,reaction_code,reactor_name,reactor_user_id\n';
+  const rows: string[] = [];
+  for (const message of chronologicalMessages) {
+    const timestamp = dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss');
+    const sender = escapeCsv(message.name);
+    const messageId = escapeCsv(message.id);
+    const r = formatReactions(message, resolver);
+    for (const like of r.likes) {
+      rows.push(`${messageId},${timestamp},${sender},like,${escapeCsv('❤️')},${escapeCsv(like.name)},${escapeCsv(like.user_id)}`);
+    }
+    for (const emoji of r.emojis) {
+      for (const user of emoji.users) {
+        rows.push(`${messageId},${timestamp},${sender},emoji,${escapeCsv(emoji.code)},${escapeCsv(user.name)},${escapeCsv(user.user_id)}`);
+      }
+    }
+  }
+  fs.writeFileSync(path.join(csvDir, 'reactions.csv'), header + rows.join('\n'));
 }
 
 function createFilename(media: MediaFile, mediaCounts: { [date: string]: number }) {
