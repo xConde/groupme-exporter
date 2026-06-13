@@ -1,11 +1,25 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Message } from './model.js';
-import { GroupmeService } from './service.js';
+import { GroupmeService, PAGE_SIZE, redactToken } from './service.js';
 import { logMessage } from './display.js';
-import { appendMessages, appendMediaMessageIds, generateStats } from './transform.js';
-import { initiateDownloadMediaFiles, writeChatHistory, writeJsonExport, writeHtmlExport, writeCsvExport } from './download.js';
-import { ExportState, loadState, saveState, clearState } from './checkpoint.js';
+import { generateStats } from './transform.js';
+import {
+  initiateDownloadMediaFiles,
+  writeChatHistory,
+  writeJsonExport,
+  writeHtmlExport,
+  writeCsvExport,
+} from './download.js';
+import {
+  loadState,
+  saveState,
+  clearState,
+  loadMessagesCache,
+  appendMessagesToCache,
+  clearMessagesCache,
+  getMessagesCachePath,
+} from './checkpoint.js';
 import { UserResolver } from './userResolver.js';
 
 export class ExportOrchestrator {
@@ -22,22 +36,56 @@ export class ExportOrchestrator {
     saveChatHistory: boolean,
     downloadMedia: boolean = true
   ): Promise<void> {
-    let allMessages: Message[] = [];
+    const allMessages: Message[] = [];
     let lastMessageId: string | undefined = undefined;
-    let mediaMessageIds: string[] = [];
+    const mediaMessageIds: string[] = [];
     let fetchCount = 0;
-    let isResuming = false;
 
-    // Check for existing state to resume
+    // Resume only when the checkpoint matches BOTH this conversation id and type.
     const existingState = loadState(outputDir);
-    if (existingState && existingState.chatId === chatId && existingState.lastMessageId) {
-      lastMessageId = existingState.lastMessageId;
-      fetchCount = existingState.messagesProcessed;
-      isResuming = true;
-      console.log(`Resuming export from message ${lastMessageId} (${fetchCount} messages already processed)`);
-      if (saveChatHistory) {
-        console.log('Note: Chat history and JSON exports will only contain messages from the resume point forward.');
+    const cached = loadMessagesCache(outputDir);
+    const validResume =
+      !!existingState && existingState.chatId === chatId && existingState.conversationType === conversationType;
+
+    if (validResume && cached.length > 0) {
+      // Reload everything fetched in prior runs so the final export is COMPLETE,
+      // not just messages from the resume point forward. The cache is the cursor:
+      // it is written in fetch order (each batch newest-first), so the LAST element of
+      // the whole cache is the oldest message fetched, the correct next `before_id`.
+      allMessages.push(...cached);
+      for (const m of cached) {
+        if (m.attachments && m.attachments.length > 0) {
+          mediaMessageIds.push(m.id);
+        }
       }
+      lastMessageId = cached[cached.length - 1].id;
+      fetchCount = cached.length;
+      console.log(`Resuming export: ${fetchCount} messages already cached. Continuing from message ${lastMessageId}.`);
+    } else if (existingState && !validResume && cached.length > 0) {
+      // The checkpoint identifies the cache as belonging to a DIFFERENT conversation, so
+      // it is safe to discard.
+      console.error(
+        `Found a checkpoint/cache for a different conversation (type=${existingState.conversationType}, id=${existingState.chatId}) ` +
+          `in ${outputDir}. Discarding it and starting a fresh export.`
+      );
+      clearState(outputDir);
+      clearMessagesCache(outputDir);
+    } else if (cached.length > 0) {
+      // A message cache exists but there is no valid checkpoint to identify which
+      // conversation it belongs to (state missing or corrupt). Refuse to silently
+      // destroy potentially valuable data. Make the user decide.
+      throw new Error(
+        `A message cache (${getMessagesCachePath(outputDir)}, ${cached.length} messages) exists but its checkpoint is ` +
+          `missing or unreadable, so it cannot be safely resumed or validated. Delete that file to start fresh, ` +
+          `or choose a different --output directory.`
+      );
+    } else {
+      // No prior messages to resume. Clear any stale (empty) checkpoint and start fresh.
+      if (existingState) {
+        console.error('Checkpoint found but no cached messages to resume; starting a fresh export.');
+      }
+      clearState(outputDir);
+      clearMessagesCache(outputDir);
     }
 
     const startTime = Date.now();
@@ -51,8 +99,10 @@ export class ExportOrchestrator {
           resolver.seedFromGroupMembers(group.members ?? []);
           conversationName = group.name;
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.log(`Could not fetch group members for reaction name resolution: ${message}. Falling back to message-cache only.`);
+          const message = redactToken(error instanceof Error ? error.message : String(error));
+          console.error(
+            `Could not fetch group members for reaction name resolution: ${message}. Falling back to message-cache only.`
+          );
         }
       } else {
         try {
@@ -61,46 +111,54 @@ export class ExportOrchestrator {
           const selfId = me.user_id ?? me.id ?? '';
           resolver.seedFromDmParticipants({ user_id: selfId, name: me.name }, '', '');
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.log(`Could not fetch current user for DM reaction resolution: ${message}. Falling back to message-cache only.`);
+          const message = redactToken(error instanceof Error ? error.message : String(error));
+          console.error(
+            `Could not fetch current user for DM reaction resolution: ${message}. Falling back to message-cache only.`
+          );
         }
       }
 
-      let batchesFetched = 0;
+      const startedAt = validResume && existingState ? existingState.startedAt : new Date().toISOString();
+      let newMessagesThisRun = 0;
       while (true) {
         const messages = await this.service.getMessages(conversationType, chatId, lastMessageId);
         if (!messages || messages.length === 0) {
           // GroupMe returns 304/empty when before_id is past start of history. If
-          // this happens before any batch was fetched, the conversation is empty.
-          // If it happens mid-export *before* a partial batch (< 100), it's a real
-          // anomaly — log it so we'd notice rather than silently truncate.
-          if (batchesFetched > 0 && lastMessageId !== undefined) {
-            const partial = fetchCount % 100 !== 0;
-            if (!partial) {
-              console.log('Note: end-of-history signaled at a 100-multiple boundary. If the conversation is unexpectedly short, re-run to verify.');
-            }
+          // this happens before any batch was fetched this run, the conversation is empty
+          // (or already fully cached). If it happens mid-run at a full-page boundary, it's
+          // plausibly a real end-of-history, so note it when a surprisingly short export is noticeable.
+          if (newMessagesThisRun > 0 && newMessagesThisRun % PAGE_SIZE === 0) {
+            console.log(
+              `Note: end-of-history signaled at a ${PAGE_SIZE}-multiple boundary. If the conversation is unexpectedly short, re-run to verify.`
+            );
           }
           break;
         }
-        batchesFetched++;
 
         resolver.observeMessages(messages);
+        allMessages.push(...messages);
+        for (const m of messages) {
+          if (m.attachments && m.attachments.length > 0) {
+            mediaMessageIds.push(m.id);
+          }
+        }
         lastMessageId = messages[messages.length - 1].id;
-        fetchCount += messages.length;
+        fetchCount = allMessages.length;
+        newMessagesThisRun += messages.length;
         logMessage(messages, lastMessageId);
 
-        allMessages = appendMessages(allMessages, messages, true);
-        mediaMessageIds = appendMediaMessageIds(mediaMessageIds, messages, saveChatHistory);
-
-        // Save checkpoint after each batch
+        // Save the checkpoint BEFORE appending to the message cache, so the on-disk state is
+        // never behind the cache. On resume the cache is the cursor; keeping state at-or-ahead
+        // of the cache means a crash can never leave a populated cache with no checkpoint.
         saveState(outputDir, {
           conversationType,
           chatId,
           lastMessageId,
           messagesProcessed: fetchCount,
-          startedAt: existingState?.startedAt || new Date().toISOString(),
+          startedAt,
           updatedAt: new Date().toISOString(),
         });
+        appendMessagesToCache(outputDir, messages);
 
         console.log(`Fetched ${fetchCount} messages...`);
       }
@@ -109,7 +167,7 @@ export class ExportOrchestrator {
       console.log(`\nFetched ${fetchCount} messages in ${fetchElapsed}s`);
 
       if (downloadMedia) {
-        await initiateDownloadMediaFiles(allMessages, mediaMessageIds, outputDir, chatId);
+        await initiateDownloadMediaFiles(allMessages, mediaMessageIds, outputDir);
       }
 
       if (saveChatHistory) {
@@ -117,11 +175,16 @@ export class ExportOrchestrator {
         console.log('Chat history saved.');
       }
 
-      writeJsonExport(allMessages, outputDir, {
-        conversationName,
-        exportDate: new Date().toISOString(),
-        totalMessages: fetchCount,
-      }, resolver);
+      writeJsonExport(
+        allMessages,
+        outputDir,
+        {
+          conversationName,
+          exportDate: new Date().toISOString(),
+          totalMessages: fetchCount,
+        },
+        resolver
+      );
       console.log('JSON export saved.');
 
       writeHtmlExport(allMessages, outputDir, resolver);
@@ -141,19 +204,26 @@ export class ExportOrchestrator {
       console.log(`Date range: ${stats.dateRange.first} to ${stats.dateRange.last}`);
       console.log(`Most active day: ${stats.mostActiveDay}`);
       console.log(`Top contributors:`);
-      const topUsers = Object.entries(stats.messagesPerUser).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      const topUsers = Object.entries(stats.messagesPerUser)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5);
       for (const [name, count] of topUsers) {
         console.log(`  ${name}: ${count} messages`);
       }
       if (Object.keys(stats.mediaCountByType).length > 0) {
-        console.log(`Media: ${Object.entries(stats.mediaCountByType).map(([type, count]) => `${count} ${type}s`).join(', ')}`);
+        console.log(
+          `Media: ${Object.entries(stats.mediaCountByType)
+            .map(([type, count]) => `${count} ${type}s`)
+            .join(', ')}`
+        );
       }
       console.log('---');
 
-      // Export complete — clean up state file
+      // Export complete: clean up the checkpoint and the message cache.
       clearState(outputDir);
+      clearMessagesCache(outputDir);
     } catch (error: unknown) {
-      console.log('Export interrupted. Progress saved — run again to resume.');
+      console.error('Export interrupted. Progress saved; run again with the same --output to resume.');
       throw error;
     }
   }

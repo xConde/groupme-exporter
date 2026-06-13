@@ -29,7 +29,7 @@ export class UserResolver {
   }
 
   resolveMany(userIds: string[]): string[] {
-    return userIds.map(id => this.resolve(id));
+    return userIds.map((id) => this.resolve(id));
   }
 
   size(): number {

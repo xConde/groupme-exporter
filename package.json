@@ -1,22 +1,19 @@
 {
   "name": "groupme-exporter",
-  "version": "2.0.0",
-  "description": "Export media and chat history from GroupMe conversations",
+  "version": "2.1.0",
+  "description": "Export media, chat history, and reactions from GroupMe conversations",
   "type": "module",
-  "main": "src/app.ts",
+  "main": "dist/app.js",
   "bin": {
-    "groupme-exporter": "./src/app.ts"
+    "groupme-exporter": "dist/app.js"
   },
   "files": [
-    "src",
-    "package.json",
-    "tsconfig.json",
+    "dist",
     "README.md",
-    "LICENSE",
-    ".env.example"
+    "LICENSE"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "groupme",
@@ -27,27 +24,47 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/edconde/groupme-exporter.git"
+    "url": "git+https://github.com/xConde/groupme-exporter.git"
   },
+  "bugs": {
+    "url": "https://github.com/xConde/groupme-exporter/issues"
+  },
+  "homepage": "https://github.com/xConde/groupme-exporter#readme",
+  "license": "Apache-2.0",
+  "author": "Edward Conde",
   "scripts": {
     "start": "tsx src/app.ts",
     "start:env": "tsx --env-file=.env src/app.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "tsc --noEmit"
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@clack/prompts": "1.1.0",
     "commander": "14.0.3",
     "dayjs": "1.11.20",
     "nanospinner": "1.2.2",
-    "picocolors": "1.1.1",
-    "tsx": "4.21.0"
+    "picocolors": "1.1.1"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "25.5.0",
+    "@vitest/coverage-v8": "4.1.1",
+    "eslint": "10.5.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.6.0",
     "msw": "2.12.14",
+    "prettier": "3.8.4",
+    "tsx": "4.22.4",
     "typescript": "6.0.2",
+    "typescript-eslint": "8.61.0",
     "vitest": "4.1.1"
   }
 }

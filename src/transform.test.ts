@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { appendMessages, appendMediaMessageIds, groupMessagesByYear, getMediaFiles, chunkArray, generateStats, formatReactions, reactionCount } from './transform.js';
+import {
+  groupMessagesByYear,
+  getMediaFiles,
+  chunkArray,
+  generateStats,
+  formatReactions,
+  reactionCount,
+  toChronological,
+} from './transform.js';
 import { Message } from './model.js';
 import { UserResolver } from './userResolver.js';
 
@@ -23,7 +31,7 @@ describe('groupMessagesByYear', () => {
   it('should group messages by year', () => {
     const messages: Message[] = [
       makeMessage({ id: '1', created_at: 1688000000, name: 'Alice' }), // 2023-06-29
-      makeMessage({ id: '2', created_at: 1720000000, name: 'Bob' }),   // 2024-07-03
+      makeMessage({ id: '2', created_at: 1720000000, name: 'Bob' }), // 2024-07-03
       makeMessage({ id: '3', created_at: 1688086400, name: 'Alice' }), // 2023-06-30
     ];
     const result = groupMessagesByYear(messages);
@@ -36,33 +44,19 @@ describe('groupMessagesByYear', () => {
   });
 });
 
-describe('appendMessages', () => {
-  it('should concat all messages when saveChatHistory is true', () => {
-    const existing = [makeMessage({ id: '1', created_at: 100, name: 'A' })];
-    const newMsgs = [makeMessage({ id: '2', created_at: 200, name: 'B' })];
-    const result = appendMessages(existing, newMsgs, true);
-    expect(result).toHaveLength(2);
-  });
-  it('should only keep attachment messages when saveChatHistory is false', () => {
-    const existing: Message[] = [];
-    const newMsgs = [
+describe('toChronological', () => {
+  it('reverses newest-first input into oldest-first order without mutating the input', () => {
+    const input: Message[] = [
+      makeMessage({ id: '2', created_at: 200, name: 'B' }),
       makeMessage({ id: '1', created_at: 100, name: 'A' }),
-      makeMessage({ id: '2', created_at: 200, name: 'B', attachments: [{ type: 'image', url: 'http://img.jpg', created_at: 200 }] }),
     ];
-    const result = appendMessages(existing, newMsgs, false);
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('2');
+    const result = toChronological(input);
+    expect(result.map((m) => m.id)).toEqual(['1', '2']);
+    // input is untouched
+    expect(input.map((m) => m.id)).toEqual(['2', '1']);
   });
-});
-
-describe('appendMediaMessageIds', () => {
-  it('should accumulate IDs of messages with attachments', () => {
-    const msgs = [
-      makeMessage({ id: '1', created_at: 100, name: 'A' }),
-      makeMessage({ id: '2', created_at: 200, name: 'B', attachments: [{ type: 'image', url: 'x', created_at: 200 }] }),
-    ];
-    const result = appendMediaMessageIds([], msgs, true);
-    expect(result).toEqual(['2']);
+  it('handles empty array', () => {
+    expect(toChronological([])).toEqual([]);
   });
 });
 
@@ -70,7 +64,9 @@ describe('getMediaFiles', () => {
   it('should extract image and video attachments as MediaFile objects', () => {
     const msgs: Message[] = [
       makeMessage({
-        id: '1', created_at: 1672531200, name: 'A',
+        id: '1',
+        created_at: 1672531200,
+        name: 'A',
         attachments: [
           { type: 'image', url: 'http://i.groupme.com/100x100.png.abc', created_at: 0 },
           { type: 'video', url: 'http://v.groupme.com/vid.mp4', created_at: 0 },
@@ -104,7 +100,12 @@ describe('getMediaFiles', () => {
 describe('generateStats', () => {
   it('should compute correct stats', () => {
     const msgs: Message[] = [
-      makeMessage({ id: '2', created_at: 1672617600, name: 'Bob', attachments: [{ type: 'image', url: 'x', created_at: 0 }] }),
+      makeMessage({
+        id: '2',
+        created_at: 1672617600,
+        name: 'Bob',
+        attachments: [{ type: 'image', url: 'x', created_at: 0 }],
+      }),
       makeMessage({ id: '1', created_at: 1672531200, name: 'Alice' }),
     ];
     const stats = generateStats(msgs);
@@ -145,7 +146,9 @@ describe('formatReactions', () => {
     const resolver = new UserResolver();
     resolver.seedFromGroupMembers([{ user_id: 'u1', nickname: 'Alice' }]);
     const msg = makeMessage({
-      id: '1', created_at: 100, name: 'Carol',
+      id: '1',
+      created_at: 100,
+      name: 'Carol',
       reactions: [{ type: 'emoji', code: '🎉', user_ids: ['u1', 'u99'] }],
     });
     const result = formatReactions(msg, resolver);
@@ -175,7 +178,9 @@ describe('reactionCount', () => {
 
   it('counts emoji reaction user_ids only', () => {
     const msg = makeMessage({
-      id: '1', created_at: 100, name: 'Alice',
+      id: '1',
+      created_at: 100,
+      name: 'Alice',
       reactions: [
         { type: 'emoji', code: '🎉', user_ids: ['u1', 'u2'] },
         { type: 'emoji', code: '🔥', user_ids: ['u3'] },
@@ -186,7 +191,9 @@ describe('reactionCount', () => {
 
   it('sums favorited_by + all emoji reaction user_ids', () => {
     const msg = makeMessage({
-      id: '1', created_at: 100, name: 'Alice',
+      id: '1',
+      created_at: 100,
+      name: 'Alice',
       favorited_by: ['u1'],
       reactions: [{ type: 'emoji', code: '🎉', user_ids: ['u2', 'u3'] }],
     });
@@ -199,7 +206,9 @@ describe('generateStats reactions metrics', () => {
     const msgs: Message[] = [
       makeMessage({ id: '1', created_at: 100, name: 'Alice', favorited_by: ['u1', 'u2'] }),
       makeMessage({
-        id: '2', created_at: 200, name: 'Bob',
+        id: '2',
+        created_at: 200,
+        name: 'Bob',
         reactions: [{ type: 'emoji', code: '🎉', user_ids: ['u1', 'u3'] }],
       }),
     ];
@@ -212,9 +221,10 @@ describe('generateStats reactions metrics', () => {
   it('topReactors ordered desc and truncated to 10', () => {
     // Create 12 unique reactor users, with varying counts
     const msgs: Message[] = Array.from({ length: 12 }, (_, i) => {
-      const uid = `u${i}`;
       return makeMessage({
-        id: String(i), created_at: 100 + i, name: 'Sender',
+        id: String(i),
+        created_at: 100 + i,
+        name: 'Sender',
         // user i likes messages 0..i (so u0 has 1, u1 has 2, ..., u11 has 12)
         favorited_by: Array.from({ length: i + 1 }, (_, j) => `u${j}`),
       });
@@ -232,9 +242,7 @@ describe('generateStats reactions metrics', () => {
   it('topReactors resolves names via resolver', () => {
     const resolver = new UserResolver();
     resolver.seedFromGroupMembers([{ user_id: 'u1', nickname: 'Alice' }]);
-    const msgs: Message[] = [
-      makeMessage({ id: '1', created_at: 100, name: 'Sender', favorited_by: ['u1'] }),
-    ];
+    const msgs: Message[] = [makeMessage({ id: '1', created_at: 100, name: 'Sender', favorited_by: ['u1'] })];
     const stats = generateStats(msgs, resolver);
     expect(stats.topReactors[0].name).toBe('Alice');
   });
@@ -242,28 +250,36 @@ describe('generateStats reactions metrics', () => {
   it('topReactedMessages truncated to 5 and sorted desc by reactionCount', () => {
     const msgs: Message[] = Array.from({ length: 7 }, (_, i) =>
       makeMessage({
-        id: String(i), created_at: 100 + i, name: 'Alice',
+        id: String(i),
+        created_at: 100 + i,
+        name: 'Alice',
         favorited_by: Array.from({ length: i + 1 }, (_, j) => `u${j}`),
       })
     );
     const stats = generateStats(msgs);
     expect(stats.topReactedMessages).toHaveLength(5);
     for (let i = 1; i < stats.topReactedMessages.length; i++) {
-      expect(stats.topReactedMessages[i].reactionCount).toBeLessThanOrEqual(stats.topReactedMessages[i - 1].reactionCount);
+      expect(stats.topReactedMessages[i].reactionCount).toBeLessThanOrEqual(
+        stats.topReactedMessages[i - 1].reactionCount
+      );
     }
   });
 
   it('emojiBreakdown counts emoji reactions by code', () => {
     const msgs: Message[] = [
       makeMessage({
-        id: '1', created_at: 100, name: 'Alice',
+        id: '1',
+        created_at: 100,
+        name: 'Alice',
         reactions: [
           { type: 'emoji', code: '🎉', user_ids: ['u1', 'u2'] },
           { type: 'emoji', code: '🔥', user_ids: ['u3'] },
         ],
       }),
       makeMessage({
-        id: '2', created_at: 200, name: 'Bob',
+        id: '2',
+        created_at: 200,
+        name: 'Bob',
         reactions: [{ type: 'emoji', code: '🎉', user_ids: ['u4'] }],
       }),
     ];
@@ -273,9 +289,7 @@ describe('generateStats reactions metrics', () => {
   });
 
   it('returns zero reaction fields for messages with no reactions', () => {
-    const msgs: Message[] = [
-      makeMessage({ id: '1', created_at: 100, name: 'Alice' }),
-    ];
+    const msgs: Message[] = [makeMessage({ id: '1', created_at: 100, name: 'Alice' })];
     const stats = generateStats(msgs);
     expect(stats.totalReactions).toBe(0);
     expect(stats.totalLikes).toBe(0);

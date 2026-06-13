@@ -86,7 +86,7 @@ describe('ExportOrchestrator integration', () => {
     const service = new GroupmeService('test-token');
     const orchestrator = new ExportOrchestrator(service);
 
-    // Should NOT throw — 304 is the natural end of history for groups
+    // Should NOT throw: 304 is the natural end of history for groups
     await orchestrator.exportConversation('groups', 'g-1', dir, true, false);
 
     // JSON export populated
@@ -96,9 +96,7 @@ describe('ExportOrchestrator integration', () => {
     // Find Bob's reacted message in chronological output
     const bobMsg = allJson.messages.find((m: { id: string }) => m.id === 'msg-2');
     expect(bobMsg.reactions).toBeDefined();
-    expect(bobMsg.reactions.likes).toEqual([
-      { user_id: 'u-alice', name: 'Alice' },
-    ]);
+    expect(bobMsg.reactions.likes).toEqual([{ user_id: 'u-alice', name: 'Alice' }]);
     expect(bobMsg.reactions.emojis).toHaveLength(1);
     expect(bobMsg.reactions.emojis[0].code).toBe('🎉');
     expect(bobMsg.reactions.emojis[0].users.map((u: { name: string }) => u.name).sort()).toEqual(['Alice', 'Carol']);
@@ -135,7 +133,9 @@ describe('ExportOrchestrator integration', () => {
     // Tidy reactions.csv: one row per reactor
     const reactionsCsv = fs.readFileSync(path.join(dir, 'csv', 'reactions.csv'), 'utf-8');
     const reactionLines = reactionsCsv.trim().split('\n');
-    expect(reactionLines[0]).toBe('message_id,timestamp,sender,reaction_type,reaction_code,reactor_name,reactor_user_id');
+    expect(reactionLines[0]).toBe(
+      'message_id,timestamp,sender,reaction_type,reaction_code,reactor_name,reactor_user_id'
+    );
     // msg-2 has 1 like + 2 emoji reactors = 3 rows
     expect(reactionLines.length).toBe(4);
     expect(reactionsCsv).toContain('msg-2');
@@ -148,7 +148,7 @@ describe('ExportOrchestrator integration', () => {
     // Checkpoint cleared on successful completion
     expect(fs.existsSync(path.join(dir, '.groupme-export-state.json'))).toBe(false);
 
-    // Verify the 304 was actually exercised — both message calls happened
+    // Verify the 304 was actually exercised: both message calls happened
     expect(messagesCalls).toBe(2);
   });
 
@@ -223,7 +223,7 @@ describe('ExportOrchestrator integration', () => {
                   user_id: 'u-other',
                   name: 'Other',
                   text: 'thx',
-                  // Other person liked our message — uses our `id` value
+                  // Other person liked our message, uses our `id` value
                   favorited_by: ['self-id-only'],
                   reactions: [],
                   attachments: [],
@@ -247,7 +247,7 @@ describe('ExportOrchestrator integration', () => {
     expect(msg.reactions.likes[0]).toEqual({ user_id: 'self-id-only', name: 'Self' });
   });
 
-  it('continues export when getGroup fails — falls back to message-cache', async () => {
+  it('continues export when getGroup fails, falls back to message-cache', async () => {
     const dir = createTmpDir();
 
     server.use(
@@ -267,5 +267,261 @@ describe('ExportOrchestrator integration', () => {
 
     const allJson = JSON.parse(fs.readFileSync(path.join(dir, 'json', 'all.json'), 'utf-8'));
     expect(allJson.metadata.messageCount).toBe(0);
+  });
+
+  it('resume reloads cached messages and produces a COMPLETE export', async () => {
+    const dir = createTmpDir();
+
+    // Simulate a prior interrupted run: 2 messages already fetched (newest-first) and cached.
+    const msgB = {
+      id: 'mb',
+      created_at: 1700000200,
+      user_id: 'u-bob',
+      name: 'Bob',
+      text: 'newest',
+      favorited_by: [],
+      reactions: [],
+      attachments: [],
+    };
+    const msgA = {
+      id: 'ma',
+      created_at: 1700000100,
+      user_id: 'u-alice',
+      name: 'Alice',
+      text: 'middle',
+      favorited_by: [],
+      reactions: [],
+      attachments: [],
+    };
+    fs.writeFileSync(
+      path.join(dir, '.groupme-messages.jsonl'),
+      JSON.stringify(msgB) + '\n' + JSON.stringify(msgA) + '\n'
+    );
+    fs.writeFileSync(
+      path.join(dir, '.groupme-export-state.json'),
+      JSON.stringify({
+        conversationType: 'groups',
+        chatId: 'g-1',
+        lastMessageId: 'ma',
+        messagesProcessed: 2,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+    );
+
+    const observedBeforeIds: (string | null)[] = [];
+    let messagesCalls = 0;
+    server.use(
+      http.get(`${API_BASE_URL}/groups/g-1`, () =>
+        HttpResponse.json({
+          response: { id: 'g-1', name: 'Test Group', members: [{ user_id: 'u-carol', nickname: 'Carol' }] },
+        })
+      ),
+      http.get(`${API_BASE_URL}/groups/g-1/messages`, ({ request }) => {
+        observedBeforeIds.push(new URL(request.url).searchParams.get('before_id'));
+        messagesCalls++;
+        if (messagesCalls === 1) {
+          return HttpResponse.json({
+            response: {
+              count: 1,
+              messages: [
+                {
+                  id: 'mc',
+                  created_at: 1700000000,
+                  user_id: 'u-carol',
+                  name: 'Carol',
+                  text: 'oldest',
+                  favorited_by: [],
+                  reactions: [],
+                  attachments: [],
+                },
+              ],
+            },
+          });
+        }
+        return new HttpResponse(null, { status: 304 }); // end of history
+      })
+    );
+
+    const orchestrator = new ExportOrchestrator(new GroupmeService('test-token'));
+    await orchestrator.exportConversation('groups', 'g-1', dir, true, false);
+
+    // The first resumed request must continue from the cache's oldest id (gapless, no restart).
+    expect(observedBeforeIds[0]).toBe('ma');
+
+    // The export contains ALL THREE messages in chronological order, not just the resumed one.
+    const allJson = JSON.parse(fs.readFileSync(path.join(dir, 'json', 'all.json'), 'utf-8'));
+    expect(allJson.metadata.messageCount).toBe(3);
+    expect(allJson.messages.map((m: { id: string }) => m.id)).toEqual(['mc', 'ma', 'mb']);
+
+    // Stats count matches the actual exported messages.
+    const stats = JSON.parse(fs.readFileSync(path.join(dir, 'stats.json'), 'utf-8'));
+    expect(stats.totalMessages).toBe(3);
+
+    // Checkpoint and cache are cleaned up on success.
+    expect(fs.existsSync(path.join(dir, '.groupme-export-state.json'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, '.groupme-messages.jsonl'))).toBe(false);
+  });
+
+  it('uses the message cache (not the state lastMessageId) as the resume cursor', async () => {
+    const dir = createTmpDir();
+
+    // The cache is the source of truth. Even though state.lastMessageId disagrees,
+    // the orchestrator must continue from the OLDEST cached message (last cache line).
+    const m3 = {
+      id: 'm3',
+      created_at: 1700000300,
+      user_id: 'u1',
+      name: 'A',
+      text: 'newest',
+      favorited_by: [],
+      reactions: [],
+      attachments: [],
+    };
+    const m2 = {
+      id: 'm2',
+      created_at: 1700000200,
+      user_id: 'u1',
+      name: 'A',
+      text: 'mid',
+      favorited_by: [],
+      reactions: [],
+      attachments: [],
+    };
+    const m1 = {
+      id: 'm1',
+      created_at: 1700000100,
+      user_id: 'u1',
+      name: 'A',
+      text: 'oldest',
+      favorited_by: [],
+      reactions: [],
+      attachments: [],
+    };
+    fs.writeFileSync(
+      path.join(dir, '.groupme-messages.jsonl'),
+      [m3, m2, m1].map((m) => JSON.stringify(m)).join('\n') + '\n'
+    );
+    fs.writeFileSync(
+      path.join(dir, '.groupme-export-state.json'),
+      JSON.stringify({
+        conversationType: 'groups',
+        chatId: 'g-1',
+        lastMessageId: 'bogus-state-id',
+        messagesProcessed: 99,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+    );
+
+    const observedBeforeIds: (string | null)[] = [];
+    server.use(
+      http.get(`${API_BASE_URL}/groups/g-1`, () =>
+        HttpResponse.json({ response: { id: 'g-1', name: 'G', members: [] } })
+      ),
+      http.get(`${API_BASE_URL}/groups/g-1/messages`, ({ request }) => {
+        observedBeforeIds.push(new URL(request.url).searchParams.get('before_id'));
+        return new HttpResponse(null, { status: 304 }); // nothing older
+      })
+    );
+
+    await new ExportOrchestrator(new GroupmeService('test-token')).exportConversation(
+      'groups',
+      'g-1',
+      dir,
+      true,
+      false
+    );
+
+    expect(observedBeforeIds[0]).toBe('m1'); // oldest cached, NOT 'bogus-state-id'
+    const allJson = JSON.parse(fs.readFileSync(path.join(dir, 'json', 'all.json'), 'utf-8'));
+    expect(allJson.messages.map((m: { id: string }) => m.id)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('aborts rather than deleting a message cache that has no valid checkpoint', async () => {
+    const dir = createTmpDir();
+    // A populated cache with NO state file must never be silently destroyed.
+    fs.writeFileSync(
+      path.join(dir, '.groupme-messages.jsonl'),
+      JSON.stringify({ id: 'x', created_at: 1700000000, name: 'A', text: 'precious', attachments: [] }) + '\n'
+    );
+
+    await expect(
+      new ExportOrchestrator(new GroupmeService('test-token')).exportConversation('groups', 'g-1', dir, true, false)
+    ).rejects.toThrow(/cannot be safely resumed/);
+
+    // The cache must still be intact (not deleted).
+    expect(fs.existsSync(path.join(dir, '.groupme-messages.jsonl'))).toBe(true);
+  });
+
+  it('does NOT resume when the checkpoint is for a different conversation type, starts fresh', async () => {
+    const dir = createTmpDir();
+
+    // Stale checkpoint/cache from a DM export, but we now ask for a group with the same id.
+    fs.writeFileSync(
+      path.join(dir, '.groupme-messages.jsonl'),
+      JSON.stringify({
+        id: 'stale',
+        created_at: 1699999999,
+        name: 'Ghost',
+        text: 'should be discarded',
+        attachments: [],
+      }) + '\n'
+    );
+    fs.writeFileSync(
+      path.join(dir, '.groupme-export-state.json'),
+      JSON.stringify({
+        conversationType: 'chats',
+        chatId: 'g-1',
+        lastMessageId: 'stale',
+        messagesProcessed: 1,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+    );
+
+    const observedBeforeIds: (string | null)[] = [];
+    let messagesCalls = 0;
+    server.use(
+      http.get(`${API_BASE_URL}/groups/g-1`, () =>
+        HttpResponse.json({
+          response: { id: 'g-1', name: 'Test Group', members: [] },
+        })
+      ),
+      http.get(`${API_BASE_URL}/groups/g-1/messages`, ({ request }) => {
+        observedBeforeIds.push(new URL(request.url).searchParams.get('before_id'));
+        messagesCalls++;
+        if (messagesCalls === 1) {
+          return HttpResponse.json({
+            response: {
+              count: 1,
+              messages: [
+                {
+                  id: 'fresh',
+                  created_at: 1700000000,
+                  user_id: 'u1',
+                  name: 'Alice',
+                  text: 'fresh start',
+                  favorited_by: [],
+                  reactions: [],
+                  attachments: [],
+                },
+              ],
+            },
+          });
+        }
+        return new HttpResponse(null, { status: 304 });
+      })
+    );
+
+    const orchestrator = new ExportOrchestrator(new GroupmeService('test-token'));
+    await orchestrator.exportConversation('groups', 'g-1', dir, true, false);
+
+    // Fresh start: the first request had no before_id, and the stale cached message is gone.
+    expect(observedBeforeIds[0]).toBeNull();
+    const allJson = JSON.parse(fs.readFileSync(path.join(dir, 'json', 'all.json'), 'utf-8'));
+    expect(allJson.metadata.messageCount).toBe(1);
+    expect(allJson.messages[0].id).toBe('fresh');
+    expect(allJson.messages.find((m: { id: string }) => m.id === 'stale')).toBeUndefined();
   });
 });

@@ -1,0 +1,23 @@
+# Source and tests — not needed at runtime
+src/
+*.test.ts
+
+# TypeScript config
+tsconfig*.json
+
+# CI / GitHub config
+.github/
+
+# Editor / tooling config
+.editorconfig
+.nvmrc
+.gitattributes
+.env.example
+eslint.config.js
+.prettierrc
+.prettierrc.js
+.prettierrc.json
+.prettierrc.yaml
+.prettierrc.yml
+.prettierignore
+vitest.config.ts

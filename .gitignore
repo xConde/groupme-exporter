@@ -3,3 +3,5 @@ dist
 .env
 *.log
 .groupme-export-state.json
+.groupme-messages.jsonl
+coverage
