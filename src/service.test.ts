@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import { GroupmeService } from './service.js';
+import { GroupmeService, redactToken } from './service.js';
 import { ApiError } from './errors.js';
 
 const API_BASE_URL = 'https://api.groupme.com/v3';
@@ -22,9 +22,7 @@ describe('GroupmeService', () => {
           const url = new URL(request.url);
           expect(url.searchParams.get('token')).toBe('test-token');
           return HttpResponse.json({
-            response: [
-              { id: '123', name: 'Test Group' },
-            ],
+            response: [{ id: '123', name: 'Test Group' }],
           });
         })
       );
@@ -62,9 +60,7 @@ describe('GroupmeService', () => {
           return HttpResponse.json({
             response: {
               count: 1,
-              messages: [
-                { id: '1', created_at: 1672531200, text: 'Hello', name: 'Alice', attachments: [] },
-              ],
+              messages: [{ id: '1', created_at: 1672531200, text: 'Hello', name: 'Alice', attachments: [] }],
             },
           });
         })
@@ -83,9 +79,7 @@ describe('GroupmeService', () => {
           return HttpResponse.json({
             response: {
               count: 1,
-              direct_messages: [
-                { id: '2', created_at: 1672531200, text: 'Hi', name: 'Bob', attachments: [] },
-              ],
+              direct_messages: [{ id: '2', created_at: 1672531200, text: 'Hi', name: 'Bob', attachments: [] }],
             },
           });
         })
@@ -179,7 +173,11 @@ describe('GroupmeService', () => {
         })
       );
 
-      const result = await service.makeRequestWithRetries<{ response: { data: string } }>('test', { token: 'test-token' }, 5);
+      const result = await service.makeRequestWithRetries<{ response: { data: string } }>(
+        'test',
+        { token: 'test-token' },
+        5
+      );
       expect(result.response.data).toBe('ok');
       expect(attempt).toBe(3);
     });
@@ -191,8 +189,7 @@ describe('GroupmeService', () => {
         })
       );
 
-      await expect(service.makeRequestWithRetries('test', { token: 'bad' }, 3))
-        .rejects.toThrow(ApiError);
+      await expect(service.makeRequestWithRetries('test', { token: 'bad' }, 3)).rejects.toThrow(ApiError);
 
       try {
         await service.makeRequestWithRetries('test', { token: 'bad' }, 3);
@@ -219,5 +216,65 @@ describe('GroupmeService', () => {
       expect(result.response).toBe('ok');
       expect(attempt).toBe(2);
     });
+  });
+});
+
+describe('redactToken', () => {
+  it('replaces token value with <redacted> and does not contain the original secret', () => {
+    const input = 'https://api.groupme.com/v3/groups?token=SECRET123&page=1';
+    const result = redactToken(input);
+    expect(result).toContain('token=<redacted>');
+    expect(result).not.toContain('SECRET123');
+  });
+
+  it('redacts token when it is the last query parameter', () => {
+    const input = 'https://api.groupme.com/v3/groups?page=1&token=MYSECRET';
+    const result = redactToken(input);
+    expect(result).toContain('token=<redacted>');
+    expect(result).not.toContain('MYSECRET');
+  });
+
+  it('leaves strings without a token parameter unchanged', () => {
+    const input = 'https://api.groupme.com/v3/groups?page=1';
+    expect(redactToken(input)).toBe(input);
+  });
+});
+
+describe('getMessages response:null guard', () => {
+  const service = new GroupmeService('test-token');
+
+  it('returns [] when the API responds with { response: null } and does not throw', async () => {
+    server.use(
+      http.get(`${API_BASE_URL}/groups/123/messages`, () => {
+        return HttpResponse.json({ response: null, meta: { code: 200 } });
+      })
+    );
+
+    const messages = await service.getMessages('groups', '123');
+    expect(messages).toEqual([]);
+  });
+});
+
+describe('makeRequestWithRetries invalid JSON on 2xx', () => {
+  const service = new GroupmeService('test-token');
+
+  it('rejects with non-retryable ApiError and hits the endpoint exactly once', async () => {
+    let callCount = 0;
+    server.use(
+      http.get(`${API_BASE_URL}/badjson`, () => {
+        callCount++;
+        return new HttpResponse('<html>oops</html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        });
+      })
+    );
+
+    await expect(service.makeRequestWithRetries('badjson', { token: 'test-token' }, 5)).rejects.toMatchObject({
+      retryable: false,
+      statusCode: 200,
+    });
+
+    expect(callCount).toBe(1);
   });
 });

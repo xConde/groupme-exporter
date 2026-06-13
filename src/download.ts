@@ -1,45 +1,66 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Readable } from 'node:stream';
+import { once } from 'node:events';
+import { pipeline } from 'node:stream/promises';
 import dayjs from 'dayjs';
 import advancedFormat from 'dayjs/plugin/advancedFormat.js';
 dayjs.extend(advancedFormat);
 import { createSpinner } from 'nanospinner';
 import { MediaFile, Message } from './model.js';
-import { getMediaFiles, chunkArray, groupMessagesByYear, formatReactions } from './transform.js';
+import { getMediaFiles, chunkArray, groupMessagesByYear, formatReactions, toChronological } from './transform.js';
 import { UserResolver } from './userResolver.js';
 
-export async function initiateDownloadMediaFiles(allMessages: Message[], mediaMessageIds: string[], outputDir: string, chatId: string) {
-  const mediaFiles = getMediaFiles(mediaMessageIds, allMessages);
+/** Abort a single media download (entire request: headers + body transfer) after this long. */
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
 
-  const batchSize = 10;
-  const batches = chunkArray(mediaFiles, batchSize);
-
-  let successfulDownloads = 0;
-  let totalDownloads = 0;
-
-  for (const batch of batches) {
-    try {
-      await downloadMediaFiles(batch, outputDir, chatId, batchSize);
-      successfulDownloads += batch.length;
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`Error downloading media: ${message}`);
-    }
-    totalDownloads += batch.length;
-  }
-
-  console.log(`Download complete: ${successfulDownloads} out of ${totalDownloads} media files saved to ${outputDir}`);
+export interface DownloadResult {
+  downloaded: number;
+  skipped: number;
+  failed: number;
 }
 
-export async function downloadMediaFiles(mediaFiles: MediaFile[], outputDir: string, chatId: string, batchSize: number = 10): Promise<void> {
-  if (mediaFiles.length === 0) { return; }
+/** True only for absolute http(s) URLs. Guards both downloads and embedded HTML attribute values. */
+function isSafeHttpUrl(url: string): boolean {
+  if (!url) {
+    return false;
+  }
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+export async function initiateDownloadMediaFiles(
+  allMessages: Message[],
+  mediaMessageIds: string[],
+  outputDir: string
+): Promise<DownloadResult> {
+  const mediaFiles = getMediaFiles(mediaMessageIds, allMessages);
+  if (mediaFiles.length === 0) {
+    console.log('No media files to download.');
+    return { downloaded: 0, skipped: 0, failed: 0 };
+  }
+
+  // downloadMediaFiles reports the final summary via its spinner; no duplicate log here.
+  return downloadMediaFiles(mediaFiles, outputDir);
+}
+
+export async function downloadMediaFiles(
+  mediaFiles: MediaFile[],
+  outputDir: string,
+  batchSize: number = 10
+): Promise<DownloadResult> {
+  if (mediaFiles.length === 0) {
+    return { downloaded: 0, skipped: 0, failed: 0 };
+  }
 
   console.log(`Processing ${mediaFiles.length} media files...`);
 
   // Pre-generate all filenames synchronously to avoid race conditions
   const mediaCounts: { [date: string]: number } = {};
-  const filePlan = mediaFiles.map(media => {
+  const filePlan = mediaFiles.map((media) => {
     const mediaFilename = createFilename(media, mediaCounts);
     const mediaPath = createMediaPath(media, mediaFilename, outputDir);
     return { media, mediaFilename, mediaPath };
@@ -48,44 +69,98 @@ export async function downloadMediaFiles(mediaFiles: MediaFile[], outputDir: str
   const batchSpinner = createSpinner('Downloading...').start();
   let downloaded = 0;
   let skipped = 0;
+  let failed = 0;
 
   const batches = chunkArray(filePlan, batchSize);
   for (const batch of batches) {
-    await Promise.all(batch.map(async ({ media, mediaFilename, mediaPath }) => {
-      // Skip if already exists
-      if (fs.existsSync(mediaPath)) {
-        skipped++;
-        return;
-      }
+    await Promise.all(
+      batch.map(async ({ media, mediaFilename, mediaPath }) => {
+        const outcome = await downloadOneMediaFile(media, mediaPath);
+        if (outcome === 'downloaded') {
+          downloaded++;
+        } else if (outcome === 'skipped') {
+          skipped++;
+        } else {
+          failed++;
+        }
 
-      if (!media.mediaUrl || (!media.mediaUrl.startsWith('http://') && !media.mediaUrl.startsWith('https://'))) { return; }
-      const response = await fetch(media.mediaUrl);
-      if (!response.ok || !response.body) { return; }
-      // Cast needed: DOM ReadableStream and Node ReadableStream types are incompatible
-      const readable = Readable.fromWeb(response.body as any);
-      const stream = readable.pipe(fs.createWriteStream(mediaPath));
-      await new Promise(resolve => stream.on('finish', resolve));
-      downloaded++;
-
-      batchSpinner.update({ text: `${downloaded} downloaded, ${skipped} skipped / ${mediaFiles.length} total | ${mediaFilename}` });
-    }));
+        batchSpinner.update({
+          text: `${downloaded} downloaded, ${skipped} skipped, ${failed} failed / ${mediaFiles.length} total | ${mediaFilename}`,
+        });
+      })
+    );
   }
 
-  batchSpinner.success({ text: `Complete: ${downloaded} new, ${skipped} skipped out of ${mediaFiles.length} media files` });
+  const summary = `Complete: ${downloaded} new, ${skipped} skipped${failed > 0 ? `, ${failed} failed` : ''} of ${mediaFiles.length} media files → ${outputDir}`;
+  if (failed > 0) {
+    batchSpinner.warn({ text: summary });
+  } else {
+    batchSpinner.success({ text: summary });
+  }
+
+  return { downloaded, skipped, failed };
 }
 
-export function writeJsonExport(allMessages: Message[], outputDir: string, metadata: { conversationName?: string; exportDate: string; totalMessages: number }, resolver?: UserResolver): void {
+/**
+ * Download a single media file. Returns the outcome so callers can report accurate counts.
+ * Writes to a `.part` temp file and renames atomically on success, so an interrupted or
+ * failed download never leaves a truncated file that future runs would silently skip.
+ */
+async function downloadOneMediaFile(media: MediaFile, mediaPath: string): Promise<'downloaded' | 'skipped' | 'failed'> {
+  if (fs.existsSync(mediaPath)) {
+    return 'skipped';
+  }
+  if (!isSafeHttpUrl(media.mediaUrl)) {
+    return 'failed';
+  }
+
+  const tmpPath = `${mediaPath}.part`;
+  try {
+    const response = await fetch(media.mediaUrl, { signal: AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT_MS) });
+    if (!response.ok || !response.body) {
+      return 'failed';
+    }
+
+    // `pipeline` propagates stream errors (no more hanging on connection resets) and
+    // destroys streams on failure. A web ReadableStream is an async-iterable source in Node.
+    const fileStream = fs.createWriteStream(tmpPath);
+    try {
+      await pipeline(response.body as unknown as AsyncIterable<Uint8Array>, fileStream);
+    } catch (err) {
+      // Wait until the write stream is fully closed before removing the temp file:
+      // createWriteStream opens the fd lazily, so a late open() could otherwise recreate
+      // the file right after we delete it.
+      fileStream.destroy();
+      if (!fileStream.closed) {
+        await once(fileStream, 'close').catch(() => {});
+      }
+      throw err;
+    }
+    fs.renameSync(tmpPath, mediaPath);
+    return 'downloaded';
+  } catch {
+    fs.rmSync(tmpPath, { force: true }); // remove any partial file so a re-run will retry
+    return 'failed';
+  }
+}
+
+export function writeJsonExport(
+  allMessages: Message[],
+  outputDir: string,
+  metadata: { conversationName?: string; exportDate: string; totalMessages: number },
+  resolver?: UserResolver
+): void {
   const jsonDir = path.join(outputDir, 'json');
   fs.mkdirSync(jsonDir, { recursive: true });
 
-  const chronologicalMessages = [...allMessages].reverse();
+  const chronologicalMessages = toChronological(allMessages);
   const messagesByYear = groupMessagesByYear(chronologicalMessages);
 
   // Per-year files
   for (const year of Object.keys(messagesByYear).sort()) {
     const yearData = {
       metadata: { ...metadata, year, messageCount: messagesByYear[year].length },
-      messages: messagesByYear[year].map(m => formatMessageJson(m, resolver)),
+      messages: messagesByYear[year].map((m) => formatMessageJson(m, resolver)),
     };
     fs.writeFileSync(path.join(jsonDir, `${year}.json`), JSON.stringify(yearData, null, 2));
   }
@@ -93,7 +168,7 @@ export function writeJsonExport(allMessages: Message[], outputDir: string, metad
   // Consolidated file
   const allData = {
     metadata: { ...metadata, messageCount: chronologicalMessages.length },
-    messages: chronologicalMessages.map(m => formatMessageJson(m, resolver)),
+    messages: chronologicalMessages.map((m) => formatMessageJson(m, resolver)),
   };
   fs.writeFileSync(path.join(jsonDir, 'all.json'), JSON.stringify(allData, null, 2));
 }
@@ -108,7 +183,7 @@ function formatMessageJson(message: Message, resolver?: UserResolver): Record<st
     sender: message.name,
     sender_id: message.user_id,
     text: message.text,
-    attachments: (message.attachments || []).map(a => ({
+    attachments: (message.attachments || []).map((a) => ({
       type: a.type,
       url: a.url,
     })),
@@ -120,14 +195,14 @@ export function writeChatHistory(allMessages: Message[], outputDir: string, reso
   const chatHistoryDir = path.join(outputDir, 'chat-history');
   fs.mkdirSync(chatHistoryDir, { recursive: true });
 
-  const chronologicalMessages = [...allMessages].reverse();
+  const chronologicalMessages = toChronological(allMessages);
   const messagesByYear = groupMessagesByYear(chronologicalMessages);
 
   const formatMessage = (message: Message): string => {
     const timestamp = dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss');
     const text = message.text ?? '';
     const attachmentIndicators = (message.attachments || [])
-      .map(a => {
+      .map((a) => {
         if (a.type === 'image' || a.type === 'linked_image') return ' [📷 Photo]';
         if (a.type === 'video') return ' [🎥 Video]';
         if (a.type === 'file') return ' [📄 File]';
@@ -140,7 +215,7 @@ export function writeChatHistory(allMessages: Message[], outputDir: string, reso
     return reactionsLine ? `${main}\n${reactionsLine}` : main;
   };
 
-  for (const year of Object.keys(messagesByYear)) {
+  for (const year of Object.keys(messagesByYear).sort()) {
     const lines = messagesByYear[year].map(formatMessage).join('\n');
     fs.writeFileSync(path.join(chatHistoryDir, `${year}.txt`), lines);
   }
@@ -154,10 +229,10 @@ function formatReactionsTextLine(message: Message, resolver?: UserResolver): str
   if (r.likes.length === 0 && r.emojis.length === 0) return '';
   const parts: string[] = [];
   if (r.likes.length > 0) {
-    parts.push(`❤️ ${r.likes.map(u => u.name).join(', ')}`);
+    parts.push(`❤️ ${r.likes.map((u) => u.name).join(', ')}`);
   }
   for (const e of r.emojis) {
-    parts.push(`${e.code} ${e.users.map(u => u.name).join(', ')}`);
+    parts.push(`${e.code} ${e.users.map((u) => u.name).join(', ')}`);
   }
   // Plain ASCII prefix so the file reads cleanly in older terminals, grep, less.
   return `  + ${parts.join(' | ')}`;
@@ -167,7 +242,7 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string, resol
   const htmlDir = path.join(outputDir, 'html');
   fs.mkdirSync(htmlDir, { recursive: true });
 
-  const chronologicalMessages = [...allMessages].reverse();
+  const chronologicalMessages = toChronological(allMessages);
 
   const escapeHtml = (text: string): string => {
     return text
@@ -183,12 +258,14 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string, resol
     if (r.likes.length === 0 && r.emojis.length === 0) return '';
     const pills: string[] = [];
     if (r.likes.length > 0) {
-      const names = escapeHtml(r.likes.map(u => u.name).join(', '));
+      const names = escapeHtml(r.likes.map((u) => u.name).join(', '));
       pills.push(`<span class="reaction"><span class="emoji">❤️</span><span class="names">${names}</span></span>`);
     }
     for (const e of r.emojis) {
-      const names = escapeHtml(e.users.map(u => u.name).join(', '));
-      pills.push(`<span class="reaction"><span class="emoji">${escapeHtml(e.code)}</span><span class="names">${names}</span></span>`);
+      const names = escapeHtml(e.users.map((u) => u.name).join(', '));
+      pills.push(
+        `<span class="reaction"><span class="emoji">${escapeHtml(e.code)}</span><span class="names">${names}</span></span>`
+      );
     }
     return `<div class="reactions">${pills.join('')}</div>`;
   };
@@ -197,11 +274,19 @@ export function writeHtmlExport(allMessages: Message[], outputDir: string, resol
     const timestamp = dayjs.unix(message.created_at).format('YYYY-MM-DD HH:mm:ss');
     const name = escapeHtml(message.name);
     const text = message.text ? escapeHtml(message.text) : '';
-    const attachments = (message.attachments || []).map(a => {
-      if (a.type === 'image') return `<img src="${escapeHtml(a.url)}" alt="Photo" style="max-width:300px;border-radius:8px;margin-top:4px;">`;
-      if (a.type === 'video') return `<a href="${escapeHtml(a.url)}" target="_blank">[Video]</a>`;
-      return `<span class="attachment">[${escapeHtml(a.type)}]</span>`;
-    }).join('');
+    const attachments = (message.attachments || [])
+      .map((a) => {
+        // Only embed URLs with a safe http(s) scheme; never javascript:/data: (stored XSS).
+        const safe = isSafeHttpUrl(a.url);
+        if (safe && (a.type === 'image' || a.type === 'linked_image')) {
+          return `<img src="${escapeHtml(a.url)}" alt="Photo" style="max-width:300px;border-radius:8px;margin-top:4px;">`;
+        }
+        if (safe && a.type === 'video') {
+          return `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener noreferrer">[Video]</a>`;
+        }
+        return `<span class="attachment">[${escapeHtml(a.type)}]</span>`;
+      })
+      .join('');
     const reactions = renderReactions(message);
 
     return `<div class="message">
@@ -254,19 +339,26 @@ export function writeCsvExport(allMessages: Message[], outputDir: string, resolv
   const csvDir = path.join(outputDir, 'csv');
   fs.mkdirSync(csvDir, { recursive: true });
 
-  const chronologicalMessages = [...allMessages].reverse();
+  const chronologicalMessages = toChronological(allMessages);
   const messagesByYear = groupMessagesByYear(chronologicalMessages);
 
   // Main message CSV: simple numeric reaction summary so analysts can sort/filter
   // without parsing nested formats. Full reactor detail lives in reactions.csv.
-  const csvHeader = 'message_id,timestamp,sender,text,attachment_count,attachment_types,like_count,emoji_reaction_count\n';
+  const csvHeader =
+    'message_id,timestamp,sender,text,attachment_count,attachment_types,like_count,emoji_reaction_count\n';
 
   const escapeCsv = (value: string): string => {
-    // RFC 4180: if value contains comma, quote, or newline, wrap in quotes and escape internal quotes
-    if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
-      return `"${value.replace(/"/g, '""')}"`;
+    // Neutralize spreadsheet formula injection: Excel/Sheets execute a cell that begins with
+    // =, +, -, @, tab, or CR. Prefix such values with a single quote so they import as text.
+    let v = value;
+    if (/^[=+\-@\t\r]/.test(v)) {
+      v = `'${v}`;
     }
-    return value;
+    // RFC 4180: if value contains comma, quote, or newline, wrap in quotes and escape internal quotes
+    if (v.includes(',') || v.includes('"') || v.includes('\n') || v.includes('\r')) {
+      return `"${v.replace(/"/g, '""')}"`;
+    }
+    return v;
   };
 
   const formatRow = (message: Message): string => {
@@ -276,7 +368,7 @@ export function writeCsvExport(allMessages: Message[], outputDir: string, resolv
     const text = escapeCsv(message.text ?? '');
     const attachments = message.attachments || [];
     const attachmentCount = String(attachments.length);
-    const attachmentTypes = escapeCsv(attachments.map(a => a.type).join(';'));
+    const attachmentTypes = escapeCsv(attachments.map((a) => a.type).join(';'));
     const reactions = formatReactions(message, resolver);
     const likeCount = String(reactions.likes.length);
     const emojiReactionCount = String(reactions.emojis.reduce((sum, e) => sum + e.users.length, 0));
@@ -311,11 +403,15 @@ function writeReactionsCsv(
     const messageId = escapeCsv(message.id);
     const r = formatReactions(message, resolver);
     for (const like of r.likes) {
-      rows.push(`${messageId},${timestamp},${sender},like,${escapeCsv('❤️')},${escapeCsv(like.name)},${escapeCsv(like.user_id)}`);
+      rows.push(
+        `${messageId},${timestamp},${sender},like,${escapeCsv('❤️')},${escapeCsv(like.name)},${escapeCsv(like.user_id)}`
+      );
     }
     for (const emoji of r.emojis) {
       for (const user of emoji.users) {
-        rows.push(`${messageId},${timestamp},${sender},emoji,${escapeCsv(emoji.code)},${escapeCsv(user.name)},${escapeCsv(user.user_id)}`);
+        rows.push(
+          `${messageId},${timestamp},${sender},emoji,${escapeCsv(emoji.code)},${escapeCsv(user.name)},${escapeCsv(user.user_id)}`
+        );
       }
     }
   }
@@ -324,7 +420,9 @@ function writeReactionsCsv(
 
 function createFilename(media: MediaFile, mediaCounts: { [date: string]: number }) {
   const dateStr = media.sentAt.format('MM-DD-YYYY');
-  if (!mediaCounts[dateStr]) { mediaCounts[dateStr] = 0; }
+  if (!mediaCounts[dateStr]) {
+    mediaCounts[dateStr] = 0;
+  }
   mediaCounts[dateStr]++;
   const hasDateDupe = mediaCounts[dateStr] > 1 ? `_${mediaCounts[dateStr]}` : '';
   return `${media.sentAt.format('MM-DD-YYYY')}${hasDateDupe}${media.mediaExt}`;

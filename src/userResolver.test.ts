@@ -37,7 +37,7 @@ describe('UserResolver', () => {
     });
 
     it('skips members with missing user_id or nickname', () => {
-      // Cast to bypass TS strictness — simulating bad API data
+      // Cast to bypass TS strictness, simulating bad API data
       resolver.seedFromGroupMembers([
         { user_id: '', nickname: 'NoId' } as GroupMember,
         { user_id: 'u3', nickname: '' } as GroupMember,
@@ -48,18 +48,14 @@ describe('UserResolver', () => {
 
   describe('observeMessages', () => {
     it('fills missing names from messages', () => {
-      const msgs = [
-        makeMessage({ id: '1', created_at: 100, name: 'Alice', user_id: 'u1' }),
-      ];
+      const msgs = [makeMessage({ id: '1', created_at: 100, name: 'Alice', user_id: 'u1' })];
       resolver.observeMessages(msgs);
       expect(resolver.resolve('u1')).toBe('Alice');
     });
 
     it('does NOT overwrite existing mapping', () => {
       resolver.seedFromGroupMembers([{ user_id: 'u1', nickname: 'Seeded Alice' }]);
-      const msgs = [
-        makeMessage({ id: '1', created_at: 100, name: 'Different Alice', user_id: 'u1' }),
-      ];
+      const msgs = [makeMessage({ id: '1', created_at: 100, name: 'Different Alice', user_id: 'u1' })];
       resolver.observeMessages(msgs);
       expect(resolver.resolve('u1')).toBe('Seeded Alice');
     });
@@ -83,13 +79,13 @@ describe('UserResolver', () => {
 
     it('skips empty user_id or name', () => {
       resolver.seedFromDmParticipants({ user_id: '', name: 'Me' }, '', 'Them');
-      // Both are empty strings which are falsy — neither should be seeded
+      // Both are empty strings which are falsy, neither should be seeded
       expect(resolver.size()).toBe(0);
     });
 
     it('skips empty other values', () => {
       resolver.seedFromDmParticipants({ user_id: 'me', name: 'Me' }, 'them', '');
-      // other name is empty — only self seeded
+      // other name is empty, only self seeded
       expect(resolver.size()).toBe(1);
       expect(resolver.resolve('me')).toBe('Me');
     });

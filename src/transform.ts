@@ -2,14 +2,12 @@ import dayjs from 'dayjs';
 import { MediaFile, Message, Reaction } from './model.js';
 import { UserResolver } from './userResolver.js';
 
-export function appendMessages(allMessages: Message[], messages: Message[], saveChatHistory: boolean): Message[] {
-  return saveChatHistory ? allMessages.concat(messages) : allMessages.concat(getAttachmentMessages(messages));
-}
-
-export function appendMediaMessageIds(mediaMessageIds: string[], messages: Message[], saveChatHistory: boolean): string[] {
-  const mediaMessages = getAttachmentMessages(messages);
-  const mediaIds = mediaMessages.map(m => m.id);
-  return mediaMessageIds.concat(mediaIds);
+/**
+ * GroupMe returns messages newest-first, and we accumulate batches in that order.
+ * `toChronological` returns an oldest-first copy for export/serialization.
+ */
+export function toChronological(messages: Message[]): Message[] {
+  return [...messages].reverse();
 }
 
 export function groupMessagesByYear(messages: Message[]): { [year: string]: Message[] } {
@@ -27,14 +25,17 @@ export function groupMessagesByYear(messages: Message[]): { [year: string]: Mess
 }
 
 export function getMediaFiles(mediaMessageIds: string[], allMessages: Message[]): MediaFile[] {
-  if (mediaMessageIds.length > 0) { allMessages = allMessages.filter(m => mediaMessageIds.includes(m.id)); }
+  if (mediaMessageIds.length > 0) {
+    const idSet = new Set(mediaMessageIds);
+    allMessages = allMessages.filter((m) => idSet.has(m.id));
+  }
   return allMessages
-    .flatMap(m =>
+    .flatMap((m) =>
       (m.attachments || [])
-        .filter(a => ['image', 'video', 'linked_image', 'file'].includes(a.type))
-        .map(a => ({ type: a.type, url: a.url, name: a.name, created_at: m.created_at }))
+        .filter((a) => ['image', 'video', 'linked_image', 'file'].includes(a.type))
+        .map((a) => ({ type: a.type, url: a.url, name: a.name, created_at: m.created_at }))
     )
-    .map(a => {
+    .map((a) => {
       let mediaType: 'photo' | 'video' | 'file';
       if (a.type === 'image' || a.type === 'linked_image') {
         mediaType = 'photo';
@@ -44,9 +45,8 @@ export function getMediaFiles(mediaMessageIds: string[], allMessages: Message[])
         mediaType = 'file';
       }
 
-      const mediaExt = mediaType === 'file'
-        ? detectFileExtension(a.url, a.name)
-        : detectMediaExtension(a.url, mediaType);
+      const mediaExt =
+        mediaType === 'file' ? detectFileExtension(a.url, a.name) : detectMediaExtension(a.url, mediaType);
 
       return {
         mediaType,
@@ -85,12 +85,10 @@ function detectFileExtension(url: string, name?: string): string {
     const urlPath = new URL(url).pathname;
     const match = urlPath.match(/\.(\w{2,5})$/);
     if (match) return `.${match[1].toLowerCase()}`;
-  } catch { /* invalid URL */ }
+  } catch {
+    /* invalid URL */
+  }
   return '';
-}
-
-function getAttachmentMessages(messages: Message[]): Message[] {
-  return messages.filter(m => m.attachments && m.attachments.length > 0);
 }
 
 export interface ReactorTally {
@@ -128,10 +126,10 @@ export interface FormattedReactions {
 
 export function formatReactions(message: Message, resolver?: UserResolver): FormattedReactions {
   const r = resolver ?? new UserResolver();
-  const likes = (message.favorited_by ?? []).map(uid => ({ user_id: uid, name: r.resolve(uid) }));
+  const likes = (message.favorited_by ?? []).map((uid) => ({ user_id: uid, name: r.resolve(uid) }));
   const emojis = (message.reactions ?? []).map((reaction: Reaction) => ({
     code: reaction.code,
-    users: (reaction.user_ids ?? []).map(uid => ({ user_id: uid, name: r.resolve(uid) })),
+    users: (reaction.user_ids ?? []).map((uid) => ({ user_id: uid, name: r.resolve(uid) })),
   }));
   return { likes, emojis };
 }
@@ -143,7 +141,7 @@ export function reactionCount(message: Message): number {
 }
 
 export function generateStats(messages: Message[], resolver?: UserResolver): ExportStats {
-  const chronological = [...messages].reverse();
+  const chronological = toChronological(messages);
 
   const messagesPerUser: Record<string, number> = {};
   const mediaCountByType: Record<string, number> = {};
@@ -204,7 +202,10 @@ export function generateStats(messages: Message[], resolver?: UserResolver): Exp
     totalMessages: chronological.length,
     dateRange: {
       first: chronological.length > 0 ? dayjs.unix(chronological[0].created_at).format('YYYY-MM-DD') : 'N/A',
-      last: chronological.length > 0 ? dayjs.unix(chronological[chronological.length - 1].created_at).format('YYYY-MM-DD') : 'N/A',
+      last:
+        chronological.length > 0
+          ? dayjs.unix(chronological[chronological.length - 1].created_at).format('YYYY-MM-DD')
+          : 'N/A',
     },
     messagesPerUser,
     mediaCountByType,
