@@ -33,9 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The package now compiles to `dist/` and ships compiled JavaScript**, so
-  `npx groupme-exporter` and global installs work without `tsx` on the user's PATH.
-  `bin`/`main` point to `dist/app.js`.
+- **The package now compiles to `dist/` and prepares compiled JavaScript** for
+  a future npm release. After publication, `npx groupme-exporter` and global
+  installs will work without `tsx` on the user's PATH. `bin`/`main` point to
+  `dist/app.js`.
 - **Minimum Node.js version is now 20** (Node 18 is end-of-life).
 - **License is declared `Apache-2.0`** in `package.json`, matching the `LICENSE` file
   (the README previously said ISC).
