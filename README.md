@@ -6,17 +6,18 @@ Export your media, chat history, and reactions from GroupMe to plain files you o
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 
-A command-line tool that runs on your own machine. The only network traffic is between you and GroupMe's official API. You need a GroupMe access token; no other account, server, or third-party service is involved.
+A command-line tool that runs on your own machine. It reads conversations through GroupMe's API and downloads media from attachment URLs in those conversations. You need a GroupMe access token; this project does not require a separate account or hosted service.
 
 ## Quick start
 
 ```bash
-# 1. Get a GroupMe API token from https://dev.groupme.com/ (see "Getting a token").
-# 2. Run it and follow the prompts:
-npx groupme-exporter
+git clone https://github.com/xConde/groupme-exporter.git
+cd groupme-exporter
+npm ci
+npm start
 ```
 
-You will be asked to paste your token, pick a group or DM from a list, and choose an output folder. You do not need to look up any IDs. To use flags instead, see [Usage](#usage).
+Requires Node.js 20 or newer. Get a [GroupMe API token](https://dev.groupme.com/) first; the CLI will ask for it, let you pick a group or DM, and ask where to save the export. You do not need to look up any IDs. To use flags instead, see [Usage](#usage).
 
 ## Features
 
@@ -44,40 +45,16 @@ You will be asked to paste your token, pick a group or DM from a list, and choos
 
 The token is tied to your account and grants read access to your own GroupMe data. Keep it private, and revoke it anytime from the same page. See [Security](#security).
 
-## Installation
+## Build a local CLI
 
-### Run without installing (npx)
-
-Once published to npm, run it directly with npx:
+After following the quick start, you can run the compiled entry point without `tsx`:
 
 ```bash
-npx groupme-exporter --help
-npx groupme-exporter --token YOUR_TOKEN --type groups --conversation GROUP_ID --output ./export
+npm run build
+node dist/app.js --help
 ```
 
-### Global install
-
-```bash
-npm install -g groupme-exporter
-groupme-exporter --help
-```
-
-### Install from source (development)
-
-```bash
-git clone https://github.com/xConde/groupme-exporter.git
-cd groupme-exporter
-npm install
-npm start
-```
-
-To produce a compiled build:
-
-```bash
-npm run build   # compiles TypeScript to dist/
-```
-
-The compiled entry point is `dist/app.js`.
+The package is not currently published to npm, so `npx groupme-exporter` and global installation will not work yet.
 
 ## Usage
 
@@ -92,31 +69,25 @@ You will be prompted for your token, conversation type, and output directory.
 ### CLI mode
 
 ```bash
-groupme-exporter --token YOUR_TOKEN --type groups --conversation GROUP_ID --output /path/to/output
+npm start -- --type groups --conversation GROUP_ID --output /path/to/output
 ```
 
 Any flag you omit falls back to an interactive prompt, so you can mix and match. Leave off `--conversation` (and `--type`) to pick from a list of your groups and DMs instead of looking up an ID.
-
-When developing from source, use `npm start --` to pass flags through tsx:
-
-```bash
-npm start -- --token YOUR_TOKEN --type groups --conversation GROUP_ID --output /path/to/output
-```
 
 ### Environment variable
 
 ```bash
 export GROUPME_TOKEN=your_token_here
-groupme-exporter --type groups --conversation GROUP_ID --output ./export
+npm start -- --type groups --conversation GROUP_ID --output ./export
 ```
 
-Or use a `.env` file in the working directory:
+Or put the token in a `.env` file in the repository root:
 
 ```env
 GROUPME_TOKEN=your_token_here
 ```
 
-The token is resolved in this order: `--token` flag, then `GROUPME_TOKEN` environment variable, then `.env` file, then interactive prompt.
+Then use `npm run start:env` instead of `npm start` to load that file. A normal `npm start` does not load `.env` automatically. The token is resolved in this order: `--token` flag, then `GROUPME_TOKEN` environment variable (including one loaded from `.env`), then interactive prompt.
 
 ### CLI options
 
@@ -187,7 +158,7 @@ If an export is interrupted, re-run the same command with the same `--output` di
 
 Your GroupMe API token is a secret credential.
 
-- The token is read from `--token`, the `GROUPME_TOKEN` environment variable, a `.env` file, or an interactive prompt, in that order of precedence.
+- The token is read from `--token`, the `GROUPME_TOKEN` environment variable (optionally loaded from `.env` with `npm run start:env`), or an interactive prompt, in that order of precedence.
 - It is sent to `api.groupme.com` over HTTPS only (GroupMe's documented authentication mechanism), and it is never written to logs or error output.
 - Do not commit your `.env` file. It is listed in `.gitignore`.
 - To revoke or rotate a token, visit [dev.groupme.com](https://dev.groupme.com/).
